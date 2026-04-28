@@ -9,7 +9,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/oakwood-commons/scafctl-plugin-sdk v0.4.0
 	github.com/stretchr/testify v1.11.1
-	github.com/zclconf/go-cty v1.16.3
+	github.com/zclconf/go-cty v1.18.1
 )
 
 require (
