@@ -5,11 +5,11 @@ go 1.26.2
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/go-logr/logr v1.4.3
-	github.com/google/jsonschema-go v0.4.2
-	github.com/hashicorp/hcl/v2 v2.23.0
+	github.com/google/jsonschema-go v0.4.3
+	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/oakwood-commons/scafctl-plugin-sdk v0.4.0
 	github.com/stretchr/testify v1.11.1
-	github.com/zclconf/go-cty v1.16.2
+	github.com/zclconf/go-cty v1.16.3
 )
 
 require (
@@ -24,7 +24,7 @@ require (
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.17 // indirect
-	github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7 // indirect
+	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/mod v0.31.0 // indirect
