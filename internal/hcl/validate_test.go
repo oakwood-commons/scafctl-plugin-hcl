@@ -58,6 +58,42 @@ func TestValidateHCL_EmptyContent(t *testing.T) {
 	assert.Equal(t, 0, result["error_count"])
 }
 
+func TestValidateHCL_QuotedTypeWarning(t *testing.T) {
+	t.Parallel()
+	src := []byte(`variable "region" {
+  type = "string"
+}`)
+	result := ValidateHCL(src, "main.tf")
+
+	// Deprecated quoted type constraints are warnings, not errors: still valid.
+	assert.True(t, result["valid"].(bool))
+	assert.Equal(t, 0, result["error_count"])
+	assert.Equal(t, 1, result["warning_count"])
+
+	warnings := result["warnings"].([]any)
+	require.Len(t, warnings, 1)
+	w := warnings[0].(map[string]any)
+	assert.Equal(t, "warning", w["severity"])
+	assert.Contains(t, w["summary"], "Quoted type constraints")
+	assert.Contains(t, w, "range")
+}
+
+func TestValidateHCL_BareTypeNoWarning(t *testing.T) {
+	t.Parallel()
+	src := []byte(`variable "region" {
+  type = string
+}
+
+variable "tags" {
+  type = map(string)
+}`)
+	result := ValidateHCL(src, "main.tf")
+
+	assert.True(t, result["valid"].(bool))
+	assert.Equal(t, 0, result["warning_count"])
+	assert.Empty(t, result["warnings"].([]any))
+}
+
 func TestValidateHCL_DefaultFilename(t *testing.T) {
 	t.Parallel()
 	src := []byte(`resource "a" "b" {}`)

@@ -6,7 +6,6 @@ package hcl
 import (
 	"math/big"
 
-	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -29,7 +28,3 @@ func ctyNumberIntVal(n int64) cty.Value {
 func ctyNumberFloatVal(f float64) cty.Value {
 	return cty.NumberFloatVal(f)
 }
-
-// hclwriteTokensForTraversal is a helper to generate tokens for a traversal reference.
-// This is unused currently but reserved for future expression-aware generation.
-var _ = hclwrite.TokensForValue // ensure hclwrite is used

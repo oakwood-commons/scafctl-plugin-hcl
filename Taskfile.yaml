@@ -2,8 +2,15 @@ version: "3"
 
 vars:
   BINARY: scafctl-plugin-hcl
+  # Provider name users reference in solutions (provider: hcl).
+  PROVIDER: hcl
+  # Host CLI used for local catalog installs; override with CLI=... if needed.
+  CLI: '{{default "scafctl" .CLI}}'
   DIST: "{{.ROOT_DIR | toSlash}}/dist"
   COVER: "{{.ROOT_DIR | toSlash}}/cover"
+  VERSION: '{{default "" .VERSION}}'
+  # Executable suffix so cross-platform (Windows) builds resolve correctly.
+  EXE: '{{if eq OS "windows"}}.exe{{end}}'
 
 env:
   CGO_ENABLED: "0"
@@ -20,12 +27,12 @@ tasks:
       - go.mod
       - go.sum
     generates:
-      - "{{.DIST}}/{{.BINARY}}"
+      - "{{.DIST}}/{{.BINARY}}{{.EXE}}"
     cmds:
       - mkdir -p {{.DIST}}
       - >-
         go build -ldflags "-s -w"
-        -o {{.DIST}}/{{.BINARY}}
+        -o {{.DIST}}/{{.BINARY}}{{.EXE}}
         ./cmd/{{.BINARY}}/
 
   test:
@@ -53,6 +60,38 @@ tasks:
     desc: Run benchmarks
     cmds:
       - go test -run='^$' -bench='.' -benchmem -count=1 ./...
+
+  publish:local:
+    desc: Build and install the plugin into the local catalog for end-to-end testing
+    deps: [build]
+    cmds:
+      - >-
+        {{.CLI}} build plugin --force
+        --name {{.PROVIDER}}
+        --kind provider
+        --version {{default "0.1.0" .VERSION}}
+        --platform {{OS}}/{{ARCH}}={{.DIST}}/{{.BINARY}}{{.EXE}}
+
+  release:local:
+    desc: "Build and install a versioned local catalog artifact (usage: task release:local VERSION=2.0.1)"
+    deps: [build]
+    requires:
+      vars: [VERSION]
+    cmds:
+      - >-
+        {{.CLI}} build plugin --force
+        --name {{.PROVIDER}}
+        --kind provider
+        --version {{.VERSION}}
+        --platform {{OS}}/{{ARCH}}={{.DIST}}/{{.BINARY}}{{.EXE}}
+
+  release:tag:
+    desc: "Create and push a signed release tag, triggering the CI release workflow (usage: task release:tag VERSION=2.0.1)"
+    requires:
+      vars: [VERSION]
+    cmds:
+      - git tag -s v{{.VERSION}} -m "v{{.VERSION}}"
+      - git push origin v{{.VERSION}}
 
   clean:
     desc: Remove build artifacts

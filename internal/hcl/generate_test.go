@@ -316,7 +316,7 @@ func TestGenerateHCL_Expressions(t *testing.T) {
 		"outputs": []any{
 			map[string]any{
 				"name":  "id",
-				"value": "var.region",
+				"value": "${var.region}",
 			},
 		},
 	}
