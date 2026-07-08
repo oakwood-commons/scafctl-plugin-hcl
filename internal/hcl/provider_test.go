@@ -427,6 +427,21 @@ func TestPlugin_DescribeWhatIf(t *testing.T) {
 			contains: "generate",
 		},
 		{
+			name:     "generate HCL from blocks",
+			input:    map[string]any{"operation": "generate", "blocks": map[string]any{}},
+			contains: "structured blocks",
+		},
+		{
+			name:     "generate Terraform JSON",
+			input:    map[string]any{"operation": "generate", "output_format": "json", "blocks": map[string]any{}},
+			contains: "Terraform JSON",
+		},
+		{
+			name:     "parse with multiple paths",
+			input:    map[string]any{"operation": "parse", "paths": []any{"a.tf", "b.tf"}},
+			contains: "multiple files",
+		},
+		{
 			name:     "default operation (no op field)",
 			input:    map[string]any{"path": "/tf/vars.tf"},
 			contains: "/tf/vars.tf",

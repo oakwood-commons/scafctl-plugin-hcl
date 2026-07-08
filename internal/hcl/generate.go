@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
@@ -15,6 +16,11 @@ import (
 // The input map follows the same schema as ParseHCL output: top-level keys are
 // block types (variable, resource, module, output, locals, provider, terraform,
 // moved, import, data, check) with arrays of block definitions.
+//
+// Values follow Terraform's JSON conventions: a string wrapped as "${ ... }" is
+// emitted as a bare expression, type constraints and addresses (for example
+// variable.type or moved.from) are emitted bare, and every other value is a
+// quoted literal.
 func GenerateHCL(input map[string]any) (string, error) {
 	f := hclwrite.NewEmptyFile()
 	body := f.Body()
@@ -56,7 +62,9 @@ func GenerateHCL(input map[string]any) (string, error) {
 			if needsNewline {
 				body.AppendNewline()
 			}
-			generateTerraformBlock(body, m)
+			if err := generateTerraformBlock(body, m); err != nil {
+				return "", fmt.Errorf("generating terraform block: %w", err)
+			}
 			needsNewline = true
 
 		case "locals":
@@ -67,7 +75,9 @@ func GenerateHCL(input map[string]any) (string, error) {
 			if needsNewline {
 				body.AppendNewline()
 			}
-			generateLocalsBlock(body, m)
+			if err := generateLocalsBlock(body, m); err != nil {
+				return "", fmt.Errorf("generating locals block: %w", err)
+			}
 			needsNewline = true
 
 		default:
@@ -100,27 +110,19 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 	block := body.AppendNewBlock(blockType, labels)
 	blockBody := block.Body()
 
-	// Get the attribute keys we should write, excluding label keys and sub-block keys.
-	skipKeys := labelKeySet(blockType)
-	skipKeys["blocks"] = true
-	skipKeys["attributes"] = true
-	skipKeys["validation"] = true
-	skipKeys["assertions"] = true
-	skipKeys["data"] = true // for check blocks
-
 	// Write promoted attributes first (well-known fields).
-	promoted := promotedKeysForBlock(blockType)
-	for _, key := range promoted {
+	for _, key := range promotedKeysForBlock(blockType) {
 		if v, ok := def[key]; ok {
-			writeAttribute(blockBody, key, v)
+			if err := writePromoted(blockBody, blockType, key, v); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Write remaining attributes from the "attributes" map.
 	if attrs, ok := def["attributes"].(map[string]any); ok {
-		keys := sortedKeys(attrs)
-		for _, k := range keys {
-			writeAttribute(blockBody, k, attrs[k])
+		if err := writeAttrs(blockBody, attrs); err != nil {
+			return err
 		}
 	}
 
@@ -128,11 +130,8 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 	if validations, ok := def["validation"].([]any); ok {
 		for _, v := range validations {
 			if vm, ok := v.(map[string]any); ok {
-				valBlock := blockBody.AppendNewBlock("validation", nil)
-				valBody := valBlock.Body()
-				keys := sortedKeys(vm)
-				for _, k := range keys {
-					writeAttribute(valBody, k, vm[k])
+				if err := writeAttrs(blockBody.AppendNewBlock("validation", nil).Body(), vm); err != nil {
+					return err
 				}
 			}
 		}
@@ -142,11 +141,8 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 	if assertions, ok := def["assertions"].([]any); ok {
 		for _, a := range assertions {
 			if am, ok := a.(map[string]any); ok {
-				aBlock := blockBody.AppendNewBlock("assert", nil)
-				aBody := aBlock.Body()
-				keys := sortedKeys(am)
-				for _, k := range keys {
-					writeAttribute(aBody, k, am[k])
+				if err := writeAttrs(blockBody.AppendNewBlock("assert", nil).Body(), am); err != nil {
+					return err
 				}
 			}
 		}
@@ -165,10 +161,8 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 				}
 				dBlock := blockBody.AppendNewBlock("data", dataLabels)
 				if attrs, ok := dm["attributes"].(map[string]any); ok {
-					dBody := dBlock.Body()
-					keys := sortedKeys(attrs)
-					for _, k := range keys {
-						writeAttribute(dBody, k, attrs[k])
+					if err := writeAttrs(dBlock.Body(), attrs); err != nil {
+						return err
 					}
 				}
 			}
@@ -178,32 +172,32 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 	// Write generic sub-blocks from "blocks" array.
 	if blocks, ok := def["blocks"].([]any); ok {
 		for _, b := range blocks {
-			if bm, ok := b.(map[string]any); ok {
-				bType, _ := bm["type"].(string)
-				var bLabels []string
-				if ls, ok := bm["labels"].([]any); ok {
-					for _, l := range ls {
-						if s, ok := l.(string); ok {
-							bLabels = append(bLabels, s)
-						}
+			bm, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			bType, _ := bm["type"].(string)
+			var bLabels []string
+			if ls, ok := bm["labels"].([]any); ok {
+				for _, l := range ls {
+					if s, ok := l.(string); ok {
+						bLabels = append(bLabels, s)
 					}
 				}
-				sub := blockBody.AppendNewBlock(bType, bLabels)
-				subBody := sub.Body()
-				if attrs, ok := bm["attributes"].(map[string]any); ok {
-					keys := sortedKeys(attrs)
-					for _, k := range keys {
-						writeAttribute(subBody, k, attrs[k])
-					}
+			}
+			subBody := blockBody.AppendNewBlock(bType, bLabels).Body()
+			if attrs, ok := bm["attributes"].(map[string]any); ok {
+				if err := writeAttrs(subBody, attrs); err != nil {
+					return err
 				}
-				// Recurse into nested blocks.
-				if nested, ok := bm["blocks"].([]any); ok {
-					for _, nb := range nested {
-						if nbm, ok := nb.(map[string]any); ok {
-							nbType, _ := nbm["type"].(string)
-							if err := generateBlock(subBody, nbType, nbm); err != nil {
-								return err
-							}
+			}
+			// Recurse into nested blocks.
+			if nested, ok := bm["blocks"].([]any); ok {
+				for _, nb := range nested {
+					if nbm, ok := nb.(map[string]any); ok {
+						nbType, _ := nbm["type"].(string)
+						if err := generateBlock(subBody, nbType, nbm); err != nil {
+							return err
 						}
 					}
 				}
@@ -214,21 +208,126 @@ func generateBlock(body *hclwrite.Body, blockType string, def map[string]any) er
 	return nil
 }
 
+// bareKind classifies a promoted attribute whose value must be emitted bare
+// (a type constraint, address reference, or list of addresses) rather than as a
+// quoted string literal.
+type bareKind uint8
+
+const (
+	bareNone bareKind = iota
+	bareType
+	bareAddr
+	bareAddrList
+)
+
+// promotedBareKind reports how a promoted key's value must be rendered. These
+// are the schema positions where a value is always a type constraint or a
+// static address, never an arbitrary literal.
+func promotedBareKind(blockType, key string) bareKind {
+	switch blockType {
+	case "variable":
+		if key == "type" {
+			return bareType
+		}
+	case "moved":
+		if key == "from" || key == "to" {
+			return bareAddr
+		}
+	case "import":
+		if key == "to" || key == "provider" {
+			return bareAddr
+		}
+	case "module", "output":
+		if key == "depends_on" {
+			return bareAddrList
+		}
+	}
+	return bareNone
+}
+
+// writePromoted writes a promoted attribute, rendering type constraints and
+// address references bare (never quoted) and all other values normally. Bare
+// positions are schema-defined to be strings, so a non-string value is rejected
+// with a clear error rather than silently emitting an invalid quoted literal.
+func writePromoted(body *hclwrite.Body, blockType, key string, v any) error {
+	switch promotedBareKind(blockType, key) {
+	case bareType:
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("attribute %q: type constraint must be a string, got %T", key, v)
+		}
+		toks, err := typeConstraintTokens(exprSource(s))
+		if err != nil {
+			return fmt.Errorf("attribute %q: %w", key, err)
+		}
+		body.SetAttributeRaw(key, toks)
+		return nil
+	case bareAddr:
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("attribute %q: address must be a string, got %T", key, v)
+		}
+		toks, err := exprTokens(exprSource(s))
+		if err != nil {
+			return fmt.Errorf("attribute %q: %w", key, err)
+		}
+		body.SetAttributeRaw(key, toks)
+		return nil
+	case bareAddrList:
+		switch vv := v.(type) {
+		case []any:
+			parts := make([]string, 0, len(vv))
+			for _, it := range vv {
+				s, ok := it.(string)
+				if !ok {
+					return fmt.Errorf("attribute %q: address entries must be strings, got %T", key, it)
+				}
+				parts = append(parts, exprSource(s))
+			}
+			toks, err := exprTokens("[" + strings.Join(parts, ", ") + "]")
+			if err != nil {
+				return fmt.Errorf("attribute %q: %w", key, err)
+			}
+			body.SetAttributeRaw(key, toks)
+			return nil
+		case string:
+			// A whole-string expression such as a parsed "${[...]}" list.
+			toks, err := exprTokens(exprSource(vv))
+			if err != nil {
+				return fmt.Errorf("attribute %q: %w", key, err)
+			}
+			body.SetAttributeRaw(key, toks)
+			return nil
+		default:
+			return fmt.Errorf("attribute %q: must be a list of addresses or an expression, got %T", key, v)
+		}
+	}
+	return writeAttribute(body, key, v)
+}
+
+// writeAttrs writes every attribute in sorted key order, returning the first error.
+func writeAttrs(body *hclwrite.Body, attrs map[string]any) error {
+	for _, k := range sortedKeys(attrs) {
+		if err := writeAttribute(body, k, attrs[k]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // generateTerraformBlock creates a terraform { ... } block.
-func generateTerraformBlock(body *hclwrite.Body, def map[string]any) {
-	block := body.AppendNewBlock("terraform", nil)
-	blockBody := block.Body()
+func generateTerraformBlock(body *hclwrite.Body, def map[string]any) error {
+	blockBody := body.AppendNewBlock("terraform", nil).Body()
 
 	if rv, ok := def["required_version"].(string); ok {
-		writeAttribute(blockBody, "required_version", rv)
+		if err := writeAttribute(blockBody, "required_version", rv); err != nil {
+			return err
+		}
 	}
 
 	if rp, ok := def["required_providers"].(map[string]any); ok && len(rp) > 0 {
-		rpBlock := blockBody.AppendNewBlock("required_providers", nil)
-		rpBody := rpBlock.Body()
-		keys := sortedKeys(rp)
-		for _, k := range keys {
-			writeAttribute(rpBody, k, rp[k])
+		if err := writeAttrs(blockBody.AppendNewBlock("required_providers", nil).Body(), rp); err != nil {
+			return err
 		}
 	}
 
@@ -240,117 +339,122 @@ func generateTerraformBlock(body *hclwrite.Body, def map[string]any) {
 		}
 		bBlock := blockBody.AppendNewBlock("backend", labels)
 		if attrs, ok := backend["attributes"].(map[string]any); ok {
-			bBody := bBlock.Body()
-			keys := sortedKeys(attrs)
-			for _, k := range keys {
-				writeAttribute(bBody, k, attrs[k])
+			if err := writeAttrs(bBlock.Body(), attrs); err != nil {
+				return err
 			}
 		}
 	}
 
 	if cloud, ok := def["cloud"].(map[string]any); ok && len(cloud) > 0 {
-		cBlock := blockBody.AppendNewBlock("cloud", nil)
-		cBody := cBlock.Body()
-		keys := sortedKeys(cloud)
-		for _, k := range keys {
-			writeAttribute(cBody, k, cloud[k])
+		if err := writeAttrs(blockBody.AppendNewBlock("cloud", nil).Body(), cloud); err != nil {
+			return err
 		}
 	}
 
 	if attrs, ok := def["attributes"].(map[string]any); ok {
-		keys := sortedKeys(attrs)
-		for _, k := range keys {
-			writeAttribute(blockBody, k, attrs[k])
+		if err := writeAttrs(blockBody, attrs); err != nil {
+			return err
 		}
 	}
+
+	return nil
 }
 
 // generateLocalsBlock creates a locals { ... } block.
-func generateLocalsBlock(body *hclwrite.Body, locals map[string]any) {
-	block := body.AppendNewBlock("locals", nil)
-	blockBody := block.Body()
-	keys := sortedKeys(locals)
-	for _, k := range keys {
-		writeAttribute(blockBody, k, locals[k])
-	}
+func generateLocalsBlock(body *hclwrite.Body, locals map[string]any) error {
+	return writeAttrs(body.AppendNewBlock("locals", nil).Body(), locals)
 }
 
 // writeAttribute writes a key-value attribute to an hclwrite body.
 // Values are converted to HCL token representations.
-func writeAttribute(body *hclwrite.Body, key string, val any) {
-	tokens := valueToTokens(val)
+func writeAttribute(body *hclwrite.Body, key string, val any) error {
+	tokens, err := valueToTokens(val)
+	if err != nil {
+		return fmt.Errorf("attribute %q: %w", key, err)
+	}
 	body.SetAttributeRaw(key, tokens)
+	return nil
 }
 
-// valueToTokens converts a Go value into hclwrite tokens.
-func valueToTokens(val any) hclwrite.Tokens {
+// valueToTokens converts a Go value into hclwrite tokens. Strings that are
+// whole-string Terraform interpolations ("${ ... }") are emitted as bare
+// expressions; every other string is emitted as a quoted string literal.
+func valueToTokens(val any) (hclwrite.Tokens, error) {
 	switch v := val.(type) {
 	case string:
-		// Check if the string looks like an HCL expression (references, function calls).
-		if looksLikeExpression(v) {
-			return hclwrite.TokensForIdentifier(v)
+		if inner, ok := interpolationExpr(v); ok {
+			return exprTokens(inner)
 		}
-		return hclwrite.TokensForValue(ctyStringVal(v))
+		return hclwrite.TokensForValue(ctyStringVal(v)), nil
 	case bool:
-		return hclwrite.TokensForValue(ctyBoolVal(v))
+		return hclwrite.TokensForValue(ctyBoolVal(v)), nil
 	case int:
-		return hclwrite.TokensForValue(ctyNumberIntVal(int64(v)))
+		return hclwrite.TokensForValue(ctyNumberIntVal(int64(v))), nil
 	case int64:
-		return hclwrite.TokensForValue(ctyNumberIntVal(v))
+		return hclwrite.TokensForValue(ctyNumberIntVal(v)), nil
 	case float64:
-		return hclwrite.TokensForValue(ctyNumberFloatVal(v))
+		return hclwrite.TokensForValue(ctyNumberFloatVal(v)), nil
 	case []any:
 		return tokensForList(v)
 	case map[string]any:
 		return tokensForObject(v)
 	case nil:
-		return hclwrite.TokensForIdentifier("null")
+		return hclwrite.TokensForIdentifier("null"), nil
 	default:
-		return hclwrite.TokensForValue(ctyStringVal(fmt.Sprintf("%v", v)))
+		return hclwrite.TokensForValue(ctyStringVal(fmt.Sprintf("%v", v))), nil
 	}
 }
 
 // tokensForList renders a Go slice as HCL list tokens: [a, b, c].
-func tokensForList(items []any) hclwrite.Tokens {
-	var src strings.Builder
-	src.WriteString("[")
-	for i, item := range items {
-		if i > 0 {
-			src.WriteString(", ")
-		}
-		src.WriteString(valueToHCLString(item))
-	}
-	src.WriteString("]")
-	return hclwrite.TokensForIdentifier(src.String())
+func tokensForList(items []any) (hclwrite.Tokens, error) {
+	return exprTokens(valueToHCLSource(items))
 }
 
-// tokensForObject renders a Go map as HCL object tokens: {k = v, ...}.
-func tokensForObject(m map[string]any) hclwrite.Tokens {
-	if len(m) == 0 {
-		return hclwrite.TokensForIdentifier("{}")
+// tokensForObject renders a Go map as HCL object tokens: { k = v, ... }.
+func tokensForObject(m map[string]any) (hclwrite.Tokens, error) {
+	return exprTokens(valueToHCLSource(m))
+}
+
+// valueToHCLSource renders any Go value as HCL expression source text,
+// recursing into lists and objects. Whole-string interpolations become bare
+// expressions; every other string becomes a quoted literal.
+func valueToHCLSource(val any) string {
+	switch v := val.(type) {
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			parts = append(parts, valueToHCLSource(item))
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case map[string]any:
+		keys := sortedKeys(v)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, objectKey(k)+" = "+valueToHCLSource(v[k]))
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+	default:
+		return valueToHCLString(v)
 	}
-	var src strings.Builder
-	src.WriteString("{\n")
-	keys := sortedKeys(m)
-	for _, k := range keys {
-		src.WriteString("    ")
-		src.WriteString(k)
-		src.WriteString(" = ")
-		src.WriteString(valueToHCLString(m[k]))
-		src.WriteString("\n")
+}
+
+// objectKey renders an object attribute key, quoting it when it is not a valid
+// bare HCL identifier.
+func objectKey(k string) string {
+	if hclsyntax.ValidIdentifier(k) {
+		return k
 	}
-	src.WriteString("  }")
-	return hclwrite.TokensForIdentifier(src.String())
+	return quoteHCLString(k)
 }
 
 // valueToHCLString renders a scalar Go value as an HCL literal string.
 func valueToHCLString(val any) string {
 	switch v := val.(type) {
 	case string:
-		if looksLikeExpression(v) {
-			return v
+		if inner, ok := interpolationExpr(v); ok {
+			return inner
 		}
-		return fmt.Sprintf("%q", v)
+		return quoteHCLString(v)
 	case bool:
 		if v {
 			return "true"
@@ -372,25 +476,19 @@ func valueToHCLString(val any) string {
 	}
 }
 
-// looksLikeExpression returns true if a string appears to be an HCL expression
-// rather than a plain string literal (e.g., variable references, function calls).
-func looksLikeExpression(s string) bool {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "var.") || strings.HasPrefix(s, "local.") ||
-		strings.HasPrefix(s, "module.") || strings.HasPrefix(s, "data.") ||
-		strings.HasPrefix(s, "each.") || strings.HasPrefix(s, "self.") ||
-		strings.HasPrefix(s, "count.") || strings.HasPrefix(s, "path.") {
-		return true
-	}
-	// Function calls like merge(...), lookup(...)
-	if strings.Contains(s, "(") && strings.HasSuffix(s, ")") {
-		return true
-	}
-	// Ternary: condition ? a : b
-	if strings.Contains(s, "?") && strings.Contains(s, ":") {
-		return true
-	}
-	return false
+// quoteHCLString renders s as a quoted HCL string literal, escaping template
+// interpolation sequences so a literal "${" or "%{" is not evaluated.
+func quoteHCLString(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		"\n", `\n`,
+		"\r", `\r`,
+		"\t", `\t`,
+		"${", `$${`,
+		"%{", `%%{`,
+	)
+	return `"` + r.Replace(s) + `"`
 }
 
 // labelsForBlock returns the appropriate HCL block labels based on block type.
@@ -415,20 +513,6 @@ func labelsForBlock(blockType string, def map[string]any) []string {
 		}
 	}
 	return nil
-}
-
-// labelKeySet returns a set of keys used as labels for a given block type.
-func labelKeySet(blockType string) map[string]bool {
-	switch blockType {
-	case "variable", "module", "output", "check":
-		return map[string]bool{"name": true}
-	case "resource", "data":
-		return map[string]bool{"type": true, "name": true}
-	case "provider":
-		return map[string]bool{"name": true}
-	default:
-		return map[string]bool{}
-	}
 }
 
 // promotedKeysForBlock returns well-known attribute keys that should be written

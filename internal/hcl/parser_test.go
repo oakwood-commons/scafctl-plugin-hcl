@@ -488,8 +488,8 @@ func TestParseHCL_Expressions(t *testing.T) {
 	web := resources[0].(map[string]any)
 	attrs := web["attributes"].(map[string]any)
 
-	assert.Equal(t, "var.ami_id", attrs["ami"])
-	assert.Equal(t, "local.instance_type", attrs["instance_type"])
+	assert.Equal(t, "${var.ami_id}", attrs["ami"])
+	assert.Equal(t, "${local.instance_type}", attrs["instance_type"])
 	assert.Contains(t, attrs["count"].(string), "var.enabled")
 }
 

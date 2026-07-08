@@ -16,6 +16,10 @@ import (
 
 // ParseHCL parses raw HCL content and extracts structured block information.
 // The filename parameter is used for error reporting and defaults to "input.tf".
+//
+// Non-literal expressions are represented using Terraform's interpolation
+// convention ("${ ... }") so callers can distinguish an expression from a plain
+// string literal; type constraints and addresses are kept bare.
 func ParseHCL(src []byte, filename string) (map[string]any, error) {
 	if filename == "" {
 		filename = "input.tf"
@@ -102,7 +106,7 @@ func extractVariable(block *hclsyntax.Block, src []byte) map[string]any {
 	attrs := bodyAttributes(block.Body, src)
 
 	if typ, ok := attrs["type"]; ok {
-		v["type"] = typ
+		v["type"] = unwrapExpr(typ)
 		delete(attrs, "type")
 	}
 	if def, ok := attrs["default"]; ok {
@@ -182,6 +186,31 @@ func extractDataSource(block *hclsyntax.Block, src []byte) map[string]any {
 	return d
 }
 
+// addressListFromBody returns a list-of-addresses attribute (such as
+// depends_on) as a slice of bare address strings when the attribute is present
+// and shaped as a tuple/list constructor. This preserves Terraform JSON
+// semantics (an array of addresses) instead of wrapping the whole list in a
+// single "${...}" interpolation string.
+func addressListFromBody(body *hclsyntax.Body, name string, src []byte) ([]any, bool) {
+	attr, ok := body.Attributes[name]
+	if !ok {
+		return nil, false
+	}
+	tuple, ok := attr.Expr.(*hclsyntax.TupleConsExpr)
+	if !ok {
+		return nil, false
+	}
+	items := make([]any, 0, len(tuple.Exprs))
+	for _, e := range tuple.Exprs {
+		rng := e.Range()
+		if rng.Start.Byte >= len(src) || rng.End.Byte > len(src) {
+			return nil, false
+		}
+		items = append(items, strings.TrimSpace(string(src[rng.Start.Byte:rng.End.Byte])))
+	}
+	return items, true
+}
+
 // extractModule extracts: module "name" { ... }
 func extractModule(block *hclsyntax.Block, src []byte) map[string]any {
 	m := map[string]any{
@@ -196,6 +225,11 @@ func extractModule(block *hclsyntax.Block, src []byte) map[string]any {
 			m[key] = val
 			delete(attrs, key)
 		}
+	}
+
+	// Preserve depends_on as a structured list of addresses for JSON fidelity.
+	if items, ok := addressListFromBody(block.Body, "depends_on", src); ok {
+		m["depends_on"] = items
 	}
 
 	if len(attrs) > 0 {
@@ -223,6 +257,11 @@ func extractOutput(block *hclsyntax.Block, src []byte) map[string]any {
 			o[key] = val
 			delete(attrs, key)
 		}
+	}
+
+	// Preserve depends_on as a structured list of addresses for JSON fidelity.
+	if items, ok := addressListFromBody(block.Body, "depends_on", src); ok {
+		o["depends_on"] = items
 	}
 
 	if len(attrs) > 0 {
@@ -307,10 +346,10 @@ func extractMoved(block *hclsyntax.Block, src []byte) map[string]any {
 	attrs := bodyAttributes(block.Body, src)
 	m := map[string]any{}
 	if from, ok := attrs["from"]; ok {
-		m["from"] = from
+		m["from"] = unwrapExpr(from)
 	}
 	if to, ok := attrs["to"]; ok {
-		m["to"] = to
+		m["to"] = unwrapExpr(to)
 	}
 	return m
 }
@@ -321,7 +360,11 @@ func extractImport(block *hclsyntax.Block, src []byte) map[string]any {
 	i := map[string]any{}
 	for _, key := range []string{"to", "id", "provider", "for_each"} {
 		if val, ok := attrs[key]; ok {
-			i[key] = val
+			if key == "to" || key == "provider" {
+				i[key] = unwrapExpr(val)
+			} else {
+				i[key] = val
+			}
 		}
 	}
 	return i
@@ -418,11 +461,13 @@ func exprToValue(expr hclsyntax.Expression, src []byte) any {
 		return ctyToGo(val)
 	}
 
-	// For non-literal expressions, return the raw source text
+	// For non-literal expressions, return the raw source text wrapped as a
+	// Terraform interpolation so downstream consumers and the generator can
+	// distinguish an expression from a plain string literal.
 	rng := expr.Range()
 	if rng.Start.Byte < len(src) && rng.End.Byte <= len(src) {
 		raw := strings.TrimSpace(string(src[rng.Start.Byte:rng.End.Byte]))
-		return raw
+		return wrapExpr(raw)
 	}
 
 	return nil

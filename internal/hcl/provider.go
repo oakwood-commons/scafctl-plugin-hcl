@@ -108,7 +108,7 @@ func (prov *Provider) Descriptor() *sdkprovider.Descriptor {
 }
 
 func buildDescriptor() *sdkprovider.Descriptor {
-	version := semver.MustParse("2.0.0")
+	version := semver.MustParse("3.0.0")
 
 	outputSchema := sdkhelper.ObjectSchema(nil, map[string]*jsonschema.Schema{
 		"variables": sdkhelper.ArrayProp("Extracted variable blocks"),
@@ -155,7 +155,7 @@ func buildDescriptor() *sdkprovider.Descriptor {
 				sdkhelper.WithMaxLength(4096),
 				sdkhelper.WithExample("./terraform"),
 			),
-			"blocks":        sdkhelper.AnyProp("Structured block data for the 'generate' operation. Uses the same schema as parse output: {variables: [...], resources: [...], ...}."),
+			"blocks":        sdkhelper.AnyProp("Structured block data for the 'generate' operation. Uses the same schema as parse output. Values follow Terraform's JSON conventions: expressions and references are interpolation strings (\"${var.x}\", \"${local.y}\"), type constraints and addresses are bare strings (\"list(string)\", \"aws_instance.web\"), and anything else is a literal value."),
 			"output_format": sdkhelper.StringProp("Output format for the 'generate' operation: 'hcl' (default) produces native HCL syntax (.tf); 'json' produces Terraform JSON syntax (.tf.json).", sdkhelper.WithEnum("hcl", "json")),
 		}),
 		OutputSchemas: map[sdkprovider.Capability]*jsonschema.Schema{
@@ -226,7 +226,7 @@ resolve:
 			},
 			{
 				Name:        "Generate HCL from structured data",
-				Description: "Produce HCL text from a map following the parse output schema",
+				Description: "Produce HCL text from a map following the parse output schema. Type constraints are bare (type: string); references use interpolation strings (value: \"${var.region}\").",
 				YAML: `name: tf-gen
 resolve:
   with:
@@ -238,7 +238,10 @@ resolve:
             - name: region
               type: string
               default: us-east-1
-              description: "AWS region"`,
+              description: "AWS region"
+          outputs:
+            - name: selected_region
+              value: "${var.region}"`,
 			},
 		},
 		Links: []sdkprovider.Link{
@@ -285,14 +288,33 @@ func (p *Plugin) DescribeWhatIf(_ context.Context, providerName string, input ma
 	if operation == "" {
 		operation = "parse"
 	}
+
+	// Describe the source of the operation, mirroring how execute resolves input.
 	var target string
 	if pa, ok := input["path"].(string); ok && pa != "" {
 		target = pa
 	} else if d, ok := input["dir"].(string); ok && d != "" {
 		target = d
+	} else if _, ok := input["paths"]; ok {
+		target = "multiple files"
 	} else if _, ok := input["content"].(string); ok {
 		target = "inline content"
+	} else if _, ok := input["blocks"]; ok {
+		target = "structured blocks"
 	}
+
+	// The generate operation can emit native HCL or Terraform JSON.
+	if operation == "generate" {
+		out := "HCL"
+		if f, ok := input["output_format"].(string); ok && f == "json" {
+			out = "Terraform JSON"
+		}
+		if target != "" {
+			return fmt.Sprintf("Would generate %s from %s", out, target), nil
+		}
+		return fmt.Sprintf("Would generate %s", out), nil
+	}
+
 	if target != "" {
 		return fmt.Sprintf("Would %s HCL from %s", operation, target), nil
 	}
@@ -556,6 +578,7 @@ func (prov *Provider) executeValidate(lgr logr.Logger, sources []hclSource) (*sd
 	results := make([]any, 0, len(sources))
 	allValid := true
 	totalErrors := 0
+	totalWarnings := 0
 	for _, src := range sources {
 		lgr.V(1).Info("validating HCL content", "bytes", len(src.data), "filename", src.filename)
 		result := ValidateHCL(src.data, src.filename)
@@ -566,13 +589,16 @@ func (prov *Provider) executeValidate(lgr logr.Logger, sources []hclSource) (*sd
 		if ec, ok := result["error_count"].(int); ok {
 			totalErrors += ec
 		}
+		if wc, ok := result["warning_count"].(int); ok {
+			totalWarnings += wc
+		}
 		results = append(results, result)
 	}
 
 	lgr.V(1).Info("provider completed", "provider", ProviderName, "operation", "validate", "files", len(sources), "allValid", allValid)
 	return &sdkprovider.Output{
 		Data: map[string]any{
-			"valid": allValid, "error_count": totalErrors, "files": results,
+			"valid": allValid, "error_count": totalErrors, "warning_count": totalWarnings, "files": results,
 		},
 		Metadata: map[string]any{"operation": "validate", "files": len(sources)},
 	}, nil
