@@ -50,7 +50,7 @@ introspect + render-tree stages end-to-end through the real plugin. From the rep
 root:
 
 ```bash
-task test:solution
+task test:e2e
 ```
 
 This installs the plugin into the local catalog and runs:

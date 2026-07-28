@@ -46,7 +46,7 @@ tasks:
       - mkdir -p {{.COVER}}
       - go test -race -coverprofile={{.COVER}}/cover.out -covermode=atomic ./...
 
-  test:solution:
+  test:e2e:
     desc: Install the plugin locally and run the example solution's functional tests
     deps: [publish:local]
     dir: examples/terraform-module-scaffold

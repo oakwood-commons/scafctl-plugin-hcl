@@ -5,6 +5,7 @@ package hcl
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -95,7 +96,9 @@ func moduleToMap(mod *tfconfig.Module, diags hcl.Diagnostics) map[string]any {
 	}
 
 	requiredCore := make([]any, 0, len(mod.RequiredCore))
-	for _, c := range mod.RequiredCore {
+	coreConstraints := append([]string(nil), mod.RequiredCore...)
+	sort.Strings(coreConstraints)
+	for _, c := range coreConstraints {
 		requiredCore = append(requiredCore, c)
 	}
 
@@ -163,7 +166,9 @@ func providerRequirementToMap(name string, rp *tfconfig.ProviderRequirement) map
 	}
 	if len(rp.VersionConstraints) > 0 {
 		constraints := make([]any, 0, len(rp.VersionConstraints))
-		for _, c := range rp.VersionConstraints {
+		sortedConstraints := append([]string(nil), rp.VersionConstraints...)
+		sort.Strings(sortedConstraints)
+		for _, c := range sortedConstraints {
 			constraints = append(constraints, c)
 		}
 		entry["version_constraints"] = constraints

@@ -743,7 +743,7 @@ func resolvePath(ctx context.Context, path string) (string, error) {
 
 func emptyIntrospectResult() map[string]any {
 	return map[string]any{
-		"path":               "",
+		"path":               ".",
 		"inputs":             []any{},
 		"outputs":            []any{},
 		"required_providers": []any{},

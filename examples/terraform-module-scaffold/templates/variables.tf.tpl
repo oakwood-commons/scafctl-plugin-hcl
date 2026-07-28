@@ -7,7 +7,7 @@ variable "{{ .name }}" {
   type = {{ .type }}
 {{- end }}
 {{- if hasKey . "description" }}
-  description = "{{ .description }}"
+  description = {{ printf "%q" .description }}
 {{- end }}
 }
 {{ end -}}
