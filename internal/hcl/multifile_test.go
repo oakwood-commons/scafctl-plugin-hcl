@@ -404,8 +404,8 @@ func TestOsFileReader_ListSubdirs(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	// Create two subdirectories and a stray file that must be ignored.
-	require.NoError(t, os.Mkdir(filepath.Join(root, "network"), 0o755))
-	require.NoError(t, os.Mkdir(filepath.Join(root, "database"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "network"), 0o750))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "database"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "readme.md"), []byte("x"), 0o600))
 
 	r := &osFileReader{}
