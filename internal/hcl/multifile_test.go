@@ -6,6 +6,8 @@ package hcl
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -395,3 +397,32 @@ func TestOsFileReader_ListHCLFiles_NonExistentDir(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reading directory")
 }
+
+// ---------- osFileReader.ListSubdirs (unit) ----------
+
+func TestOsFileReader_ListSubdirs(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Create two subdirectories and a stray file that must be ignored.
+	require.NoError(t, os.Mkdir(filepath.Join(root, "network"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "database"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "readme.md"), []byte("x"), 0o600))
+
+	r := &osFileReader{}
+	dirs, err := r.ListSubdirs(root)
+	require.NoError(t, err)
+	require.Len(t, dirs, 2)
+
+	bases := []string{filepath.Base(dirs[0]), filepath.Base(dirs[1])}
+	assert.Contains(t, bases, "network")
+	assert.Contains(t, bases, "database")
+}
+
+func TestOsFileReader_ListSubdirs_NonExistentDir(t *testing.T) {
+	t.Parallel()
+	r := &osFileReader{}
+	_, err := r.ListSubdirs("/nonexistent_dir_67890")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+}
+

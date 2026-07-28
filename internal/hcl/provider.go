@@ -5,7 +5,9 @@ package hcl
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,9 @@ type FileReader interface {
 	ReadFile(path string) ([]byte, error)
 	// ListHCLFiles returns all .tf and .tf.json files in a directory (non-recursive).
 	ListHCLFiles(dir string) ([]string, error)
+	// ListSubdirs returns the immediate subdirectories of a directory
+	// (non-recursive). Callers walk deeper by invoking it per level.
+	ListSubdirs(dir string) ([]string, error)
 }
 
 // Option is a functional option for configuring the HCL provider.
@@ -102,13 +107,32 @@ func (r *osFileReader) ListHCLFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
+func (r *osFileReader) ListSubdirs(dir string) ([]string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving dir: %w", err)
+	}
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading directory: %w", err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(absDir, e.Name()))
+	}
+	return dirs, nil
+}
+
 // Descriptor returns the provider descriptor (convenience for tests).
 func (prov *Provider) Descriptor() *sdkprovider.Descriptor {
 	return buildDescriptor()
 }
 
 func buildDescriptor() *sdkprovider.Descriptor {
-	version := semver.MustParse("3.1.0")
+	version := semver.MustParse("3.2.0")
 
 	outputSchema := sdkhelper.ObjectSchema(nil, map[string]*jsonschema.Schema{
 		"variables": sdkhelper.ArrayProp("Extracted variable blocks"),
@@ -127,19 +151,19 @@ func buildDescriptor() *sdkprovider.Descriptor {
 	return &sdkprovider.Descriptor{
 		Name:        ProviderName,
 		DisplayName: "HCL",
-		Description: "Parse, format, validate, generate, and introspect Terraform/OpenTofu HCL configuration. Operations: 'parse' extracts structured blocks (variables, resources, data sources, modules, outputs, locals, providers, terraform, moved, import, check) into typed maps; 'format' rewrites content to canonical HCL style; 'validate' checks syntax and returns diagnostics with source positions; 'generate' produces HCL (.tf) or Terraform JSON (.tf.json) from structured block data; 'introspect' returns a module-level summary (required/optional inputs, outputs, required providers, required core, module calls, and resource footprint) using HashiCorp's terraform-config-inspect. Accepts inline content, a single file path, multiple file paths, or a directory of .tf/.tf.json files.",
+		Description: "Parse, format, validate, generate, and introspect Terraform/OpenTofu HCL configuration. Operations: 'parse' extracts structured blocks (variables, resources, data sources, modules, outputs, locals, providers, terraform, moved, import, check) into typed maps; 'format' rewrites content to canonical HCL style; 'validate' checks syntax and returns diagnostics with source positions; 'generate' produces HCL (.tf) or Terraform JSON (.tf.json) from structured block data; 'introspect' returns a module-level summary (required/optional inputs, outputs, required providers, required core, module calls, and resource footprint) using HashiCorp's terraform-config-inspect; 'introspect-tree' discovers module subdirectories beneath a root directory (up to a configurable depth) and returns a per-module collection of those same summaries. Accepts inline content, a single file path, multiple file paths, or a directory of .tf/.tf.json files.",
 		APIVersion:  "v1",
 		Version:     version,
 		Category:    "data",
 		Beta:        true,
-		Tags:        []string{"hcl", "terraform", "opentofu", "parse", "format", "validate", "generate", "introspect", "module", "config"},
+		Tags:        []string{"hcl", "terraform", "opentofu", "parse", "format", "validate", "generate", "introspect", "module", "library", "config"},
 		Capabilities: []sdkprovider.Capability{
 			sdkprovider.CapabilityFrom,
 			sdkprovider.CapabilityTransform,
 		},
 		Schema: sdkhelper.ObjectSchema(nil, map[string]*jsonschema.Schema{
-			"operation": sdkhelper.StringProp("Operation to perform: 'parse' (default) extracts structured blocks; 'format' canonically formats; 'validate' checks syntax; 'generate' produces HCL from structured input; 'introspect' returns a module-level summary of inputs, outputs, and requirements.",
-				sdkhelper.WithEnum("parse", "format", "validate", "generate", "introspect")),
+			"operation": sdkhelper.StringProp("Operation to perform: 'parse' (default) extracts structured blocks; 'format' canonically formats; 'validate' checks syntax; 'generate' produces HCL from structured input; 'introspect' returns a module-level summary of inputs, outputs, and requirements; 'introspect-tree' introspects each module subdirectory beneath 'dir' and returns a per-module collection.",
+				sdkhelper.WithEnum("parse", "format", "validate", "generate", "introspect", "introspect-tree")),
 			"content": sdkhelper.StringProp("Raw HCL content to process. Provide 'content', 'path', 'paths', or 'dir' -- these are mutually exclusive.",
 				sdkhelper.WithMaxLength(10485760),
 			),
@@ -157,6 +181,13 @@ func buildDescriptor() *sdkprovider.Descriptor {
 			),
 			"blocks":        sdkhelper.AnyProp("Structured block data for the 'generate' operation. Uses the same schema as parse output. Values follow Terraform's JSON conventions: expressions and references are interpolation strings (\"${var.x}\", \"${local.y}\"), type constraints and addresses are bare strings (\"list(string)\", \"aws_instance.web\"), and anything else is a literal value."),
 			"output_format": sdkhelper.StringProp("Output format for the 'generate' operation: 'hcl' (default) produces native HCL syntax (.tf); 'json' produces Terraform JSON syntax (.tf.json).", sdkhelper.WithEnum("hcl", "json")),
+			"depth": sdkhelper.IntProp("Traversal depth for the 'introspect-tree' operation. 1 (default) introspects immediate subdirectories of 'dir'; higher values descend that many levels, treating every directory containing .tf/.tf.json files as a module. Must be >= 1.",
+				sdkhelper.WithDefault(1),
+				sdkhelper.WithMinimum(1),
+			),
+			"allowMissing": sdkhelper.BoolProp("For the 'introspect-tree' operation: when true, a missing 'dir' yields an empty result plus a diagnostic instead of a fatal error. Useful for pipelines that materialize the module tree in an earlier step.",
+				sdkhelper.WithDefault(false),
+			),
 		}),
 		OutputSchemas: map[sdkprovider.Capability]*jsonschema.Schema{
 			sdkprovider.CapabilityFrom:      outputSchema,
@@ -254,6 +285,19 @@ resolve:
         operation: introspect
         dir: ./modules/vpc`,
 			},
+			{
+				Name:        "Introspect a library of modules",
+				Description: "Discover every module subdirectory beneath a root and return a per-module summary. Use 'depth' to descend more than one level and 'allowMissing' to tolerate a not-yet-materialized directory.",
+				YAML: `name: tf-library
+resolve:
+  with:
+    - provider: hcl
+      inputs:
+        operation: introspect-tree
+        dir: ./modules
+        depth: 1
+        allowMissing: true`,
+			},
 		},
 		Links: []sdkprovider.Link{
 			{
@@ -333,6 +377,17 @@ func (p *Plugin) DescribeWhatIf(_ context.Context, providerName string, input ma
 		return "Would introspect Terraform module", nil
 	}
 
+	if operation == "introspect-tree" {
+		depth, derr := introspectTreeDepth(input)
+		if derr != nil {
+			depth = 1
+		}
+		if d, ok := input["dir"].(string); ok && d != "" {
+			return fmt.Sprintf("Would introspect Terraform module library from %s (depth %d)", d, depth), nil
+		}
+		return fmt.Sprintf("Would introspect Terraform module library (depth %d)", depth), nil
+	}
+
 	if target != "" {
 		return fmt.Sprintf("Would %s HCL from %s", operation, target), nil
 	}
@@ -370,14 +425,20 @@ func (prov *Provider) execute(ctx context.Context, inputs map[string]any) (*sdkp
 		operation = op
 	}
 
-	validOps := map[string]bool{"parse": true, "format": true, "validate": true, "generate": true, "introspect": true}
+	validOps := map[string]bool{"parse": true, "format": true, "validate": true, "generate": true, "introspect": true, "introspect-tree": true}
 	if !validOps[operation] {
-		return nil, fmt.Errorf("%s: unsupported operation %q; must be one of: parse, format, validate, generate, introspect", ProviderName, operation)
+		return nil, fmt.Errorf("%s: unsupported operation %q; must be one of: parse, format, validate, generate, introspect, introspect-tree", ProviderName, operation)
 	}
 
 	// Generate uses "blocks" input, not content/path/paths/dir.
 	if operation == "generate" {
 		return prov.executeGenerate(ctx, lgr, inputs)
+	}
+
+	// introspect-tree walks a directory of module subdirectories rather than the
+	// shared file-source resolver, so it resolves its own sources.
+	if operation == "introspect-tree" {
+		return prov.executeIntrospectTree(ctx, lgr, inputs)
 	}
 
 	// Resolve source(s) for parse/format/validate.
@@ -702,6 +763,158 @@ func moduleDirFromSources(sources []hclSource) string {
 	}
 	return filepath.Dir(fn)
 }
+
+// executeIntrospectTree discovers every module directory beneath a root and
+// introspects each as its own module, returning a per-module collection. It
+// walks up to `depth` levels of subdirectories (default 1 = immediate
+// children); each directory that contains at least one .tf/.tf.json file
+// becomes a module entry keyed by its path relative to the root.
+func (prov *Provider) executeIntrospectTree(ctx context.Context, lgr logr.Logger, inputs map[string]any) (*sdkprovider.Output, error) {
+	dir, ok := inputs["dir"].(string)
+	if !ok || dir == "" {
+		return nil, fmt.Errorf("%s: 'dir' is required for the introspect-tree operation", ProviderName)
+	}
+
+	depth, err := introspectTreeDepth(inputs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ProviderName, err)
+	}
+	allowMissing, _ := inputs["allowMissing"].(bool)
+
+	absDir, err := resolvePath(ctx, dir)
+	if err != nil {
+		return nil, fmt.Errorf("%s: resolving dir: %w", ProviderName, err)
+	}
+
+	if sdkprovider.DryRunFromContext(ctx) {
+		return &sdkprovider.Output{
+			Data: map[string]any{"root": dir, "modules": []any{}, "diagnostics": []any{}},
+			Metadata: map[string]any{
+				"mode": "dry-run", "operation": "introspect-tree", "root": dir, "depth": depth,
+			},
+		}, nil
+	}
+
+	lgr.V(1).Info("introspecting module library", "root", absDir, "depth", depth)
+
+	candidates, err := prov.discoverModuleDirs(absDir, depth)
+	if err != nil {
+		// An absent root is tolerated (empty result + diagnostic) only when opted
+		// in; otherwise it is fatal, matching the single-module introspect.
+		if allowMissing && errors.Is(err, fs.ErrNotExist) {
+			diag := map[string]any{
+				"severity": "warning",
+				"summary":  fmt.Sprintf("source directory not found: %s", dir),
+			}
+			return &sdkprovider.Output{
+				Data: map[string]any{"root": dir, "modules": []any{}, "diagnostics": []any{diag}},
+				Metadata: map[string]any{
+					"operation": "introspect-tree", "root": dir, "depth": depth, "modules": 0,
+				},
+			}, nil
+		}
+		return nil, fmt.Errorf("%s: %w", ProviderName, err)
+	}
+
+	modules := make([]libModule, 0, len(candidates))
+	for _, cand := range candidates {
+		files, listErr := prov.fileReader.ListHCLFiles(cand)
+		if listErr != nil {
+			return nil, fmt.Errorf("%s: listing directory %s: %w", ProviderName, cand, listErr)
+		}
+		if len(files) == 0 {
+			continue
+		}
+		sources := make([]hclSource, 0, len(files))
+		for _, f := range files {
+			data, readErr := prov.fileReader.ReadFile(f)
+			if readErr != nil {
+				return nil, fmt.Errorf("%s: failed to read file %s: %w", ProviderName, f, readErr)
+			}
+			sources = append(sources, hclSource{filename: f, data: data})
+		}
+		relPath, relErr := filepath.Rel(absDir, cand)
+		if relErr != nil {
+			relPath = filepath.Base(cand)
+		}
+		modules = append(modules, libModule{relPath: filepath.ToSlash(relPath), sources: sources})
+	}
+
+	result, err := IntrospectLibrary(dir, modules)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ProviderName, err)
+	}
+
+	modEntries, _ := result["modules"].([]any)
+	lgr.V(1).Info("provider completed", "provider", ProviderName,
+		"operation", "introspect-tree", "modules", len(modEntries), "depth", depth)
+
+	return &sdkprovider.Output{
+		Data: result,
+		Metadata: map[string]any{
+			"operation": "introspect-tree",
+			"root":      dir,
+			"depth":     depth,
+			"modules":   len(modEntries),
+		},
+	}, nil
+}
+
+// discoverModuleDirs performs a breadth-first walk of subdirectories beneath
+// root, returning every directory found within `depth` levels. The root itself
+// is never included, so a library root's own .tf files are not treated as a
+// module. Directories are filtered for HCL content by the caller.
+func (prov *Provider) discoverModuleDirs(root string, depth int) ([]string, error) {
+	var found []string
+	current := []string{root}
+	for level := 1; level <= depth; level++ {
+		var next []string
+		for _, d := range current {
+			subs, err := prov.fileReader.ListSubdirs(d)
+			if err != nil {
+				return nil, fmt.Errorf("reading subdirectories of %s: %w", d, err)
+			}
+			found = append(found, subs...)
+			next = append(next, subs...)
+		}
+		if len(next) == 0 {
+			break
+		}
+		current = next
+	}
+	return found, nil
+}
+
+// introspectTreeDepth reads and validates the optional "depth" input for the
+// introspect-tree operation. It defaults to 1 (immediate children) and must be
+// a positive integer.
+func introspectTreeDepth(inputs map[string]any) (int, error) {
+	raw, ok := inputs["depth"]
+	if !ok || raw == nil {
+		return 1, nil
+	}
+
+	var depth int
+	switch v := raw.(type) {
+	case int:
+		depth = v
+	case int64:
+		depth = int(v)
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("'depth' must be a whole number, got %v", v)
+		}
+		depth = int(v)
+	default:
+		return 0, fmt.Errorf("'depth' must be an integer, got %T", raw)
+	}
+
+	if depth < 1 {
+		return 0, fmt.Errorf("'depth' must be >= 1, got %d", depth)
+	}
+	return depth, nil
+}
+
 
 func dryRunOutput(operation string, sources []hclSource) *sdkprovider.Output {
 	meta := map[string]any{"mode": "dry-run", "operation": operation}

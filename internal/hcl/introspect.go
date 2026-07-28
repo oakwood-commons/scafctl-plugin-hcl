@@ -61,6 +61,46 @@ func IntrospectModule(sources []hclSource, modulePath string) (map[string]any, e
 	return moduleToMap(mod, diags), nil
 }
 
+// libModule pairs a module's HCL sources with its path relative to a library
+// root. It is the unit IntrospectLibrary introspects.
+type libModule struct {
+	relPath string
+	sources []hclSource
+}
+
+// IntrospectLibrary introspects a collection of module directories discovered
+// beneath a common root and returns a per-module document collection. Each
+// entry is the exact shape IntrospectModule produces for a single module, so
+// consumers can treat entries identically to a standalone introspection.
+//
+// Modules are introspected in path order and the resulting entries are sorted
+// by relative path so the output is stable across runs. A parse error in any
+// module is fatal and identifies the offending module, mirroring the
+// single-module introspect contract.
+func IntrospectLibrary(root string, modules []libModule) (map[string]any, error) {
+	if root == "" {
+		root = "."
+	}
+
+	sorted := append([]libModule(nil), modules...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].relPath < sorted[j].relPath })
+
+	entries := make([]any, 0, len(sorted))
+	for _, m := range sorted {
+		doc, err := IntrospectModule(m.sources, m.relPath)
+		if err != nil {
+			return nil, fmt.Errorf("module %q: %w", m.relPath, err)
+		}
+		entries = append(entries, doc)
+	}
+
+	return map[string]any{
+		"root":        root,
+		"modules":     entries,
+		"diagnostics": []any{},
+	}, nil
+}
+
 // moduleToMap converts a tfconfig.Module into a deterministic, JSON-friendly
 // document. Map-backed collections are sorted by key so the output is stable
 // across runs (tfconfig stores variables, outputs, and so on in Go maps).

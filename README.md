@@ -15,7 +15,7 @@ gh release download --repo github.com/oakwood-commons/scafctl-plugin-hcl
 ## Usage
 
 Register this plugin in your scafctl configuration, then reference
-the **hcl** provider in your solutions. The provider supports four operations
+the **hcl** provider in your solutions. The provider supports six operations
 via the `operation` input:
 
 | Operation | Purpose |
@@ -25,6 +25,7 @@ via the `operation` input:
 | `validate` | Check syntax; report errors and deprecation warnings |
 | `generate` | Produce HCL (`.tf`) or Terraform JSON (`.tf.json`) from structured data |
 | `introspect` | Summarize a module: required/optional inputs, outputs, provider/core requirements, module calls, and resource footprint |
+| `introspect-tree` | Discover module subdirectories beneath a root (to a configurable depth) and return a per-module collection of `introspect` summaries |
 
 Provide input as inline `content`, a single `path`, a list of `paths`, or a
 `dir` of `.tf`/`.tf.json` files.
@@ -88,6 +89,45 @@ The result contains:
 Collections are sorted by name so the output is deterministic. This pairs well
 with the `go-template` (`render-tree`) and `file` (`write-tree`) providers to
 scaffold per-environment `.tf` files from an existing module.
+
+### Introspecting a library of modules
+
+The `introspect-tree` operation discovers every module subdirectory beneath a
+root `dir` and returns a per-module collection. Each entry is the same shape a
+single-module `introspect` produces, plus a `path` relative to the root. Use it
+when the set of modules is dynamic or unknown at authoring time.
+
+```yaml
+resolvers:
+  library:
+    resolve:
+      with:
+        - provider: hcl
+          inputs:
+            operation: introspect-tree
+            dir: ./modules
+            depth: 1          # 1 (default) = immediate children; higher descends further
+            allowMissing: true # empty result + diagnostic instead of a hard error
+```
+
+The result contains:
+
+- `root` — the directory that was walked.
+- `modules` — one entry per discovered module (a directory containing
+  `.tf`/`.tf.json` files), each identical in shape to the single-module
+  `introspect` output with an added `path` relative to `root`. Entries are
+  sorted by `path` for deterministic output.
+- `diagnostics` — library-level warnings (for example, a missing `dir` when
+  `allowMissing` is set).
+
+Behavior notes:
+
+- `depth` (default `1`, minimum `1`) controls how many directory levels are
+  walked; every directory containing HCL within that depth becomes a module.
+- Directories without HCL files are skipped, and the root's own `.tf` files are
+  not treated as a module.
+- A parse error in any discovered module is fatal and identifies the module; a
+  missing `dir` is fatal unless `allowMissing: true`.
 
 
 ## Development

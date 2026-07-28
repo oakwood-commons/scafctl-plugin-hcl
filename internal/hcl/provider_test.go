@@ -40,6 +40,14 @@ func TestPlugin_Descriptor(t *testing.T) {
 	assert.NotEmpty(t, desc.OutputSchemas)
 	assert.NotNil(t, desc.OutputSchemas[sdkprovider.CapabilityFrom])
 	assert.NotNil(t, desc.OutputSchemas[sdkprovider.CapabilityTransform])
+
+	// The introspect-tree operation must be advertised in the operation enum.
+	opProp := desc.Schema.Properties["operation"]
+	require.NotNil(t, opProp)
+	assert.Contains(t, opProp.Enum, "introspect-tree")
+	assert.Contains(t, desc.Schema.Properties, "depth")
+	assert.Contains(t, desc.Schema.Properties, "allowMissing")
+	assert.Contains(t, desc.Tags, "library")
 }
 
 func TestPlugin_GetProviderDescriptor_UnknownProvider(t *testing.T) {
