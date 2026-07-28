@@ -1,0 +1,200 @@
+apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: terraform-module-scaffold
+  version: "1.0.0"
+  description: >-
+    Introspect a Terraform/OpenTofu module with the hcl provider and scaffold
+    per-environment files (aggregated variables.tf, a module call, and a
+    <env>.auto.tfvars seed) by composing the go-template (render-tree) and file
+    (write-tree) providers. This is the canonical single-responsibility pipeline:
+    hcl introspects, go-template renders, file writes.
+  tags:
+    - terraform
+    - scaffold
+    - hcl
+
+spec:
+  resolvers:
+    # ---- Inputs (override with -r key=value) --------------------------------
+    moduleDir:
+      type: string
+      description: Directory of the Terraform module to introspect
+      example: ./module
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: moduleDir
+          - provider: cel
+            inputs:
+              expression: "'./module'"
+
+    moduleName:
+      type: string
+      description: Name to give the generated module block
+      example: network
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: moduleName
+          - provider: cel
+            inputs:
+              expression: "'network'"
+
+    moduleSource:
+      type: string
+      description: Source path the generated module block points at
+      example: ./module
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: moduleSource
+          - provider: cel
+            inputs:
+              expression: "'./module'"
+
+    outputDir:
+      type: string
+      description: Destination directory for the scaffolded files
+      example: ./generated
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: outputDir
+          - provider: cel
+            inputs:
+              expression: "'./generated'"
+
+    environments:
+      description: Environments to scaffold a directory tree for
+      resolve:
+        with:
+          - provider: cel
+            inputs:
+              expression: '["dev", "prod"]'
+
+    # ---- Introspection (hcl provider) ---------------------------------------
+    module:
+      description: Module-level introspection summary produced by the hcl provider
+      resolve:
+        with:
+          - provider: hcl
+            inputs:
+              operation: introspect
+              dir:
+                rslvr: moduleDir
+
+    # ---- Template sources (file provider, read) -----------------------------
+    variablesTpl:
+      description: Go template for the aggregated variables.tf
+      resolve:
+        with:
+          - provider: file
+            inputs:
+              operation: read
+              path: ./templates/variables.tf.tpl
+
+    baseTpl:
+      description: Go template for the module call
+      resolve:
+        with:
+          - provider: file
+            inputs:
+              operation: read
+              path: ./templates/module_base.tf.tpl
+
+    tfvarsTpl:
+      description: Go template for the per-environment auto.tfvars seed
+      resolve:
+        with:
+          - provider: file
+            inputs:
+              operation: read
+              path: ./templates/env.auto.tfvars.tpl
+
+    # ---- Rendering (go-template provider, render-tree) ----------------------
+    files:
+      description: >-
+        Per-environment rendered file entries. Fans the three templates out
+        across every environment, rendering each with the introspected module
+        data plus the per-entry environment name.
+      resolve:
+        with:
+          - provider: go-template
+            inputs:
+              operation: render-tree
+              data:
+                expr: >-
+                  {"module": _.module, "moduleName": _.moduleName,
+                  "moduleSource": _.moduleSource}
+              entries:
+                expr: |
+                  _.environments.map(env, {
+                    "path": env + "/variables.tf",
+                    "content": _.variablesTpl.content,
+                    "data": {"environment": env}
+                  }) + _.environments.map(env, {
+                    "path": env + "/" + _.moduleName + "_base.tf",
+                    "content": _.baseTpl.content,
+                    "data": {"environment": env}
+                  }) + _.environments.map(env, {
+                    "path": env + "/" + env + ".auto.tfvars",
+                    "content": _.tfvarsTpl.content,
+                    "data": {"environment": env}
+                  })
+
+  workflow:
+    actions:
+      # ---- Writing (file provider, write-tree) ------------------------------
+      scaffold:
+        provider: file
+        description: Write the rendered per-environment files to the output directory
+        inputs:
+          operation: write-tree
+          basePath:
+            rslvr: outputDir
+          entries:
+            rslvr: files
+          onConflict: overwrite
+
+  testing:
+    config:
+      # Stage the fixture module and templates into every test sandbox so the
+      # relative paths used by the resolvers resolve during isolated test runs.
+      files:
+        - ./module/variables.tf
+        - ./module/outputs.tf
+        - ./templates/variables.tf.tpl
+        - ./templates/module_base.tf.tpl
+        - ./templates/env.auto.tfvars.tpl
+    cases:
+      introspect-and-render:
+        description: >-
+          End-to-end check: the hcl provider introspects the fixture module and
+          the go-template provider renders one file tree per environment.
+        command: [run, resolver]
+        args: ["-o", "json"]
+        assertions:
+          # Introspection surfaced all three module inputs.
+          - expression: __exitCode == 0
+          - expression: __output.module.inputs.size() == 3
+          - expression: __output.module.inputs.exists(v, v.name == "region" && v.required)
+          - expression: __output.module.inputs.exists(v, v.name == "instance_count" && !v.required)
+          # Three templates fanned across two environments => six files.
+          - expression: __output.files.size() == 6
+          - expression: |
+              __output.files.exists(f,
+                f.path == "dev/variables.tf" &&
+                f.content.contains("variable \"region\""))
+          - expression: |
+              __output.files.exists(f,
+                f.path == "prod/network_base.tf" &&
+                f.content.contains("module \"network\""))
+          - expression: |
+              __output.files.exists(f,
+                f.path == "dev/dev.auto.tfvars" &&
+                f.content.contains("region = null"))

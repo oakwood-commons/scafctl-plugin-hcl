@@ -538,7 +538,7 @@ func promotedKeysForBlock(blockType string) []string {
 }
 
 // sortedKeys returns the keys of a map in sorted order.
-func sortedKeys(m map[string]any) []string {
+func sortedKeys[T any](m map[string]T) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
