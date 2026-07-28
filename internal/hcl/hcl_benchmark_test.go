@@ -82,3 +82,46 @@ func BenchmarkGenerateHCLJSON(b *testing.B) {
 		_, _ = GenerateHCLJSON(parsed)
 	}
 }
+
+const benchModuleSource = `terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+  }
+}
+
+variable "region" {
+  type        = string
+  description = "AWS region for resources"
+}
+
+variable "instance_count" {
+  type    = number
+  default = 3
+}
+
+output "instance_id" {
+  value = aws_instance.web.id
+}
+
+module "network" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.1.0"
+}
+
+resource "aws_instance" "web" {
+  ami = "ami-123"
+}
+`
+
+func BenchmarkIntrospectModule(b *testing.B) {
+	sources := []hclSource{{filename: "bench.tf", data: []byte(benchModuleSource)}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = IntrospectModule(sources, ".")
+	}
+}

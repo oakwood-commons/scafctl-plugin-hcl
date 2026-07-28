@@ -108,7 +108,7 @@ func (prov *Provider) Descriptor() *sdkprovider.Descriptor {
 }
 
 func buildDescriptor() *sdkprovider.Descriptor {
-	version := semver.MustParse("3.0.0")
+	version := semver.MustParse("3.1.0")
 
 	outputSchema := sdkhelper.ObjectSchema(nil, map[string]*jsonschema.Schema{
 		"variables": sdkhelper.ArrayProp("Extracted variable blocks"),
@@ -127,19 +127,19 @@ func buildDescriptor() *sdkprovider.Descriptor {
 	return &sdkprovider.Descriptor{
 		Name:        ProviderName,
 		DisplayName: "HCL",
-		Description: "Parse, format, validate, and generate Terraform/OpenTofu HCL configuration. Operations: 'parse' extracts structured blocks (variables, resources, data sources, modules, outputs, locals, providers, terraform, moved, import, check) into typed maps; 'format' rewrites content to canonical HCL style; 'validate' checks syntax and returns diagnostics with source positions; 'generate' produces HCL (.tf) or Terraform JSON (.tf.json) from structured block data. Accepts inline content, a single file path, multiple file paths, or a directory of .tf/.tf.json files.",
+		Description: "Parse, format, validate, generate, and introspect Terraform/OpenTofu HCL configuration. Operations: 'parse' extracts structured blocks (variables, resources, data sources, modules, outputs, locals, providers, terraform, moved, import, check) into typed maps; 'format' rewrites content to canonical HCL style; 'validate' checks syntax and returns diagnostics with source positions; 'generate' produces HCL (.tf) or Terraform JSON (.tf.json) from structured block data; 'introspect' returns a module-level summary (required/optional inputs, outputs, required providers, required core, module calls, and resource footprint) using HashiCorp's terraform-config-inspect. Accepts inline content, a single file path, multiple file paths, or a directory of .tf/.tf.json files.",
 		APIVersion:  "v1",
 		Version:     version,
 		Category:    "data",
 		Beta:        true,
-		Tags:        []string{"hcl", "terraform", "opentofu", "parse", "format", "validate", "generate", "config"},
+		Tags:        []string{"hcl", "terraform", "opentofu", "parse", "format", "validate", "generate", "introspect", "module", "config"},
 		Capabilities: []sdkprovider.Capability{
 			sdkprovider.CapabilityFrom,
 			sdkprovider.CapabilityTransform,
 		},
 		Schema: sdkhelper.ObjectSchema(nil, map[string]*jsonschema.Schema{
-			"operation": sdkhelper.StringProp("Operation to perform: 'parse' (default) extracts structured blocks; 'format' canonically formats; 'validate' checks syntax; 'generate' produces HCL from structured input.",
-				sdkhelper.WithEnum("parse", "format", "validate", "generate")),
+			"operation": sdkhelper.StringProp("Operation to perform: 'parse' (default) extracts structured blocks; 'format' canonically formats; 'validate' checks syntax; 'generate' produces HCL from structured input; 'introspect' returns a module-level summary of inputs, outputs, and requirements.",
+				sdkhelper.WithEnum("parse", "format", "validate", "generate", "introspect")),
 			"content": sdkhelper.StringProp("Raw HCL content to process. Provide 'content', 'path', 'paths', or 'dir' -- these are mutually exclusive.",
 				sdkhelper.WithMaxLength(10485760),
 			),
@@ -243,6 +243,17 @@ resolve:
             - name: selected_region
               value: "${var.region}"`,
 			},
+			{
+				Name:        "Introspect a module directory",
+				Description: "Summarize a Terraform module's required/optional inputs, outputs, and provider requirements for scaffolding or documentation.",
+				YAML: `name: tf-module
+resolve:
+  with:
+    - provider: hcl
+      inputs:
+        operation: introspect
+        dir: ./modules/vpc`,
+			},
 		},
 		Links: []sdkprovider.Link{
 			{
@@ -315,6 +326,13 @@ func (p *Plugin) DescribeWhatIf(_ context.Context, providerName string, input ma
 		return fmt.Sprintf("Would generate %s", out), nil
 	}
 
+	if operation == "introspect" {
+		if target != "" {
+			return fmt.Sprintf("Would introspect Terraform module from %s", target), nil
+		}
+		return "Would introspect Terraform module", nil
+	}
+
 	if target != "" {
 		return fmt.Sprintf("Would %s HCL from %s", operation, target), nil
 	}
@@ -352,9 +370,9 @@ func (prov *Provider) execute(ctx context.Context, inputs map[string]any) (*sdkp
 		operation = op
 	}
 
-	validOps := map[string]bool{"parse": true, "format": true, "validate": true, "generate": true}
+	validOps := map[string]bool{"parse": true, "format": true, "validate": true, "generate": true, "introspect": true}
 	if !validOps[operation] {
-		return nil, fmt.Errorf("%s: unsupported operation %q; must be one of: parse, format, validate, generate", ProviderName, operation)
+		return nil, fmt.Errorf("%s: unsupported operation %q; must be one of: parse, format, validate, generate, introspect", ProviderName, operation)
 	}
 
 	// Generate uses "blocks" input, not content/path/paths/dir.
@@ -379,6 +397,8 @@ func (prov *Provider) execute(ctx context.Context, inputs map[string]any) (*sdkp
 		return prov.executeFormat(lgr, sources)
 	case "validate":
 		return prov.executeValidate(lgr, sources)
+	case "introspect":
+		return prov.executeIntrospect(lgr, sources)
 	default:
 		return nil, fmt.Errorf("%s: unhandled operation %q", ProviderName, operation)
 	}
@@ -643,6 +663,46 @@ func (prov *Provider) executeGenerate(ctx context.Context, lgr logr.Logger, inpu
 	}, nil
 }
 
+func (prov *Provider) executeIntrospect(lgr logr.Logger, sources []hclSource) (*sdkprovider.Output, error) {
+	modulePath := moduleDirFromSources(sources)
+	lgr.V(1).Info("introspecting module", "files", len(sources), "path", modulePath)
+
+	result, err := IntrospectModule(sources, modulePath)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", ProviderName, err)
+	}
+
+	inputs, _ := result["inputs"].([]any)
+	outputs, _ := result["outputs"].([]any)
+	lgr.V(1).Info("provider completed", "provider", ProviderName,
+		"operation", "introspect", "inputs", len(inputs), "outputs", len(outputs))
+
+	return &sdkprovider.Output{
+		Data: result,
+		Metadata: map[string]any{
+			"operation": "introspect",
+			"files":     len(sources),
+			"path":      modulePath,
+			"inputs":    len(inputs),
+			"outputs":   len(outputs),
+		},
+	}, nil
+}
+
+// moduleDirFromSources derives the module directory for introspection metadata.
+// Inline content (filename "input.tf") has no directory, so it maps to ".";
+// file-backed sources use the directory of the first file.
+func moduleDirFromSources(sources []hclSource) string {
+	if len(sources) == 0 {
+		return "."
+	}
+	fn := sources[0].filename
+	if fn == "" || fn == "input.tf" {
+		return "."
+	}
+	return filepath.Dir(fn)
+}
+
 func dryRunOutput(operation string, sources []hclSource) *sdkprovider.Output {
 	meta := map[string]any{"mode": "dry-run", "operation": operation}
 	switch operation {
@@ -664,6 +724,8 @@ func dryRunOutput(operation string, sources []hclSource) *sdkprovider.Output {
 		return &sdkprovider.Output{
 			Data: map[string]any{"valid": true, "error_count": 0, "files": []any{}}, Metadata: meta,
 		}
+	case "introspect":
+		return &sdkprovider.Output{Data: emptyIntrospectResult(), Metadata: meta}
 	default:
 		return &sdkprovider.Output{Data: emptyParseResult(), Metadata: meta}
 	}
@@ -677,6 +739,20 @@ func resolvePath(ctx context.Context, path string) (string, error) {
 		return filepath.Clean(filepath.Join(cwd, path)), nil
 	}
 	return filepath.Abs(path)
+}
+
+func emptyIntrospectResult() map[string]any {
+	return map[string]any{
+		"path":               ".",
+		"inputs":             []any{},
+		"outputs":            []any{},
+		"required_providers": []any{},
+		"required_core":      []any{},
+		"module_calls":       []any{},
+		"managed_resources":  []any{},
+		"data_resources":     []any{},
+		"diagnostics":        []any{},
+	}
 }
 
 func emptyParseResult() map[string]any {
