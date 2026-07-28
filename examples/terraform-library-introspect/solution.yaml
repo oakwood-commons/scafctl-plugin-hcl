@@ -1,0 +1,161 @@
+apiVersion: scafctl.io/v1
+kind: Solution
+metadata:
+  name: terraform-library-introspect
+  version: "1.0.0"
+  description: >-
+    Discover a library of Terraform/OpenTofu modules with the hcl provider's
+    introspect-tree operation and scaffold a root module call for each module by
+    composing the go-template (render-tree) and file (write-tree) providers.
+    Where terraform-module-scaffold introspects one module, this example walks a
+    directory of modules and generates one file per discovered module.
+  tags:
+    - terraform
+    - scaffold
+    - hcl
+    - library
+
+spec:
+  resolvers:
+    # ---- Inputs (override with -r key=value) --------------------------------
+    modulesDir:
+      type: string
+      description: Root directory containing one subdirectory per module
+      example: ./modules
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: modulesDir
+          - provider: cel
+            inputs:
+              expression: "'./modules'"
+
+    depth:
+      description: How many directory levels below modulesDir to discover modules
+      example: 1
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: depth
+          - provider: cel
+            inputs:
+              expression: "1"
+
+    outputDir:
+      type: string
+      description: Destination directory for the scaffolded files
+      example: ./generated
+      resolve:
+        with:
+          - provider: parameter
+            inputs:
+              key: outputDir
+          - provider: cel
+            inputs:
+              expression: "'./generated'"
+
+    # ---- Library introspection (hcl provider, introspect-tree) --------------
+    library:
+      description: >-
+        Per-module introspection collection produced by the hcl provider. Each
+        entry mirrors a single-module introspect result plus a path relative to
+        modulesDir.
+      resolve:
+        with:
+          - provider: hcl
+            inputs:
+              operation: introspect-tree
+              dir:
+                rslvr: modulesDir
+              depth:
+                rslvr: depth
+              allowMissing: true
+
+    # ---- Template source (file provider, read) ------------------------------
+    moduleCallTpl:
+      description: Go template that renders a root module call for one module
+      resolve:
+        with:
+          - provider: file
+            inputs:
+              operation: read
+              path: ./templates/module_call.tf.tpl
+
+    # ---- Rendering (go-template provider, render-tree) ----------------------
+    files:
+      description: >-
+        One rendered file entry per discovered module. Maps the introspected
+        modules collection into <module>.tf render entries, wiring each module's
+        inputs into a module call.
+      resolve:
+        with:
+          - provider: go-template
+            inputs:
+              operation: render-tree
+              entries:
+                expr: |
+                  _.library.modules.map(m, {
+                    "path": m.path + ".tf",
+                    "content": _.moduleCallTpl.content,
+                    "data": {
+                      "module": m,
+                      "moduleSource": _.modulesDir + "/" + m.path
+                    }
+                  })
+
+  workflow:
+    actions:
+      # ---- Writing (file provider, write-tree) ------------------------------
+      scaffold:
+        provider: file
+        description: Write one rendered module-call file per discovered module
+        inputs:
+          operation: write-tree
+          basePath:
+            rslvr: outputDir
+          entries:
+            rslvr: files
+          onConflict: overwrite
+
+  testing:
+    config:
+      # Stage the fixture module library and template into every test sandbox so
+      # introspect-tree can walk them and the file read resolver can find the
+      # template during isolated test runs.
+      files:
+        - ./modules/network/main.tf
+        - ./modules/database/main.tf
+        - ./templates/module_call.tf.tpl
+    cases:
+      introspect-tree-and-render:
+        description: >-
+          End-to-end check: the hcl provider discovers both fixture modules with
+          introspect-tree and the go-template provider renders one module-call
+          file per module.
+        command: [run, resolver]
+        args: ["-o", "json"]
+        assertions:
+          - expression: __exitCode == 0
+          # Both module subdirectories were discovered.
+          - expression: __output.library.modules.size() == 2
+          # Entries are sorted by relative path: database before network.
+          - expression: __output.library.modules[0].path == "database"
+          - expression: __output.library.modules[1].path == "network"
+          # Each module carries its introspected inputs.
+          - expression: |
+              __output.library.modules.exists(m,
+                m.path == "network" &&
+                m.inputs.exists(v, v.name == "cidr_block" && v.required))
+          # One rendered file per module, wiring the module call.
+          - expression: __output.files.size() == 2
+          - expression: |
+              __output.files.exists(f,
+                f.path == "network.tf" &&
+                f.content.contains("module \"network\"") &&
+                f.content.contains("cidr_block = var.cidr_block"))
+          - expression: |
+              __output.files.exists(f,
+                f.path == "database.tf" &&
+                f.content.contains("module \"database\""))

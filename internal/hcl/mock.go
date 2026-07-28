@@ -17,6 +17,10 @@ type MockFileReader struct {
 	ListHCLFilesFunc func(dir string) ([]string, error)
 	// DirFiles is returned by ListHCLFiles when ListHCLFilesFunc is nil.
 	DirFiles []string
+	// ListSubdirsFunc allows custom subdirectory listing per test.
+	ListSubdirsFunc func(dir string) ([]string, error)
+	// Subdirs is returned by ListSubdirs when ListSubdirsFunc is nil.
+	Subdirs []string
 }
 
 // ReadFile reads a file using the mock configuration.
@@ -36,4 +40,12 @@ func (m *MockFileReader) ListHCLFiles(dir string) ([]string, error) {
 		return m.ListHCLFilesFunc(dir)
 	}
 	return m.DirFiles, nil
+}
+
+// ListSubdirs returns the configured list of subdirectories for a directory.
+func (m *MockFileReader) ListSubdirs(dir string) ([]string, error) {
+	if m.ListSubdirsFunc != nil {
+		return m.ListSubdirsFunc(dir)
+	}
+	return m.Subdirs, nil
 }

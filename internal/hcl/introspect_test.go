@@ -6,6 +6,7 @@ package hcl
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"testing"
 
@@ -341,3 +342,319 @@ resource "aws_vpc" "west" {
 	assert.Equal(t, "aws", provider["name"])
 	assert.Equal(t, "west", provider["alias"])
 }
+
+// fakeTree models a small directory hierarchy for introspect-tree tests. Keys
+// are absolute directory/file paths (introspect-tree resolves paths before
+// walking, so absolute inputs pass through unchanged).
+type fakeTree struct {
+	subdirs  map[string][]string
+	hclFiles map[string][]string
+	files    map[string]string
+}
+
+func (f fakeTree) reader() *MockFileReader {
+	return &MockFileReader{
+		ListSubdirsFunc: func(dir string) ([]string, error) {
+			return f.subdirs[dir], nil
+		},
+		ListHCLFilesFunc: func(dir string) ([]string, error) {
+			return f.hclFiles[dir], nil
+		},
+		ReadFileFunc: func(path string) ([]byte, error) {
+			if c, ok := f.files[path]; ok {
+				return []byte(c), nil
+			}
+			return nil, fmt.Errorf("file not found: %s", path)
+		},
+	}
+}
+
+func TestIntrospectLibrary_SortedAndShape(t *testing.T) {
+	t.Parallel()
+	mods := []libModule{
+		{relPath: "zebra", sources: []hclSource{{filename: "zebra/main.tf", data: []byte(`variable "z" { type = string }`)}}},
+		{relPath: "alpha", sources: []hclSource{{filename: "alpha/main.tf", data: []byte(`variable "a" { type = string }`)}}},
+	}
+
+	result, err := IntrospectLibrary("./modules", mods)
+	require.NoError(t, err)
+	assert.Equal(t, "./modules", result["root"])
+
+	modules := result["modules"].([]any)
+	require.Len(t, modules, 2)
+	// Entries are sorted by relative path regardless of input order.
+	assert.Equal(t, "alpha", modules[0].(map[string]any)["path"])
+	assert.Equal(t, "zebra", modules[1].(map[string]any)["path"])
+	// Each entry carries the full single-module document shape.
+	assert.Contains(t, modules[0].(map[string]any), "inputs")
+	assert.Contains(t, modules[0].(map[string]any), "outputs")
+	assert.Contains(t, modules[0].(map[string]any), "required_providers")
+}
+
+func TestIntrospectLibrary_Empty(t *testing.T) {
+	t.Parallel()
+	result, err := IntrospectLibrary("", nil)
+	require.NoError(t, err)
+	assert.Equal(t, ".", result["root"])
+	assert.Empty(t, result["modules"].([]any))
+	assert.Empty(t, result["diagnostics"].([]any))
+}
+
+func TestIntrospectLibrary_ParseErrorFatal(t *testing.T) {
+	t.Parallel()
+	mods := []libModule{
+		{relPath: "broken", sources: []hclSource{{filename: "broken/main.tf", data: []byte(`variable "x" { type = `)}}},
+	}
+	_, err := IntrospectLibrary("./modules", mods)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broken")
+}
+
+func TestPlugin_Execute_IntrospectTree_ImmediateChildren(t *testing.T) {
+	t.Parallel()
+	tree := fakeTree{
+		subdirs: map[string][]string{
+			"/modules": {"/modules/network", "/modules/database", "/modules/docs"},
+		},
+		hclFiles: map[string][]string{
+			"/modules/network":  {"/modules/network/main.tf"},
+			"/modules/database": {"/modules/database/variables.tf"},
+			"/modules/docs":     {}, // no HCL -> skipped
+		},
+		files: map[string]string{
+			"/modules/network/main.tf":       tfModuleMeta,
+			"/modules/database/variables.tf": tfModuleVariables,
+		},
+	}
+	p := NewPlugin(WithFileReader(tree.reader()))
+	ctx := context.Background()
+
+	output, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/modules",
+	})
+	require.NoError(t, err)
+
+	data := output.Data.(map[string]any)
+	assert.Equal(t, "/modules", data["root"])
+	modules := data["modules"].([]any)
+	require.Len(t, modules, 2, "docs has no HCL and is skipped")
+	// Deterministically sorted by relative path: database before network.
+	assert.Equal(t, "database", modules[0].(map[string]any)["path"])
+	assert.Equal(t, "network", modules[1].(map[string]any)["path"])
+	assert.Len(t, modules[0].(map[string]any)["inputs"].([]any), 3)
+
+	assert.Equal(t, "introspect-tree", output.Metadata["operation"])
+	assert.Equal(t, 2, output.Metadata["modules"])
+	assert.Equal(t, 1, output.Metadata["depth"])
+}
+
+func TestPlugin_Execute_IntrospectTree_DepthTraversal(t *testing.T) {
+	t.Parallel()
+	tree := fakeTree{
+		subdirs: map[string][]string{
+			"/lib":       {"/lib/group"},
+			"/lib/group": {"/lib/group/network"},
+		},
+		hclFiles: map[string][]string{
+			"/lib/group":         {}, // intermediate, no HCL of its own
+			"/lib/group/network": {"/lib/group/network/main.tf"},
+		},
+		files: map[string]string{
+			"/lib/group/network/main.tf": tfModuleMeta,
+		},
+	}
+	ctx := context.Background()
+
+	// depth 1 does not descend into the nested module.
+	p := NewPlugin(WithFileReader(tree.reader()))
+	output, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/lib",
+		"depth":     1,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, output.Data.(map[string]any)["modules"].([]any))
+
+	// depth 2 discovers the nested module with a slash-joined relative path.
+	output, err = p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/lib",
+		"depth":     2,
+	})
+	require.NoError(t, err)
+	modules := output.Data.(map[string]any)["modules"].([]any)
+	require.Len(t, modules, 1)
+	assert.Equal(t, "group/network", modules[0].(map[string]any)["path"])
+	assert.Equal(t, 2, output.Metadata["depth"])
+}
+
+func TestPlugin_Execute_IntrospectTree_InvalidDepth(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin(WithFileReader(&MockFileReader{}))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/modules",
+		"depth":     0,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "depth")
+}
+
+func TestPlugin_Execute_IntrospectTree_AllowMissing(t *testing.T) {
+	t.Parallel()
+	reader := &MockFileReader{
+		ListSubdirsFunc: func(_ string) ([]string, error) {
+			return nil, fmt.Errorf("reading directory: %w", fs.ErrNotExist)
+		},
+	}
+	p := NewPlugin(WithFileReader(reader))
+	ctx := context.Background()
+
+	output, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation":    "introspect-tree",
+		"dir":          "/not-yet-materialized",
+		"allowMissing": true,
+	})
+	require.NoError(t, err)
+
+	data := output.Data.(map[string]any)
+	assert.Empty(t, data["modules"].([]any))
+	assert.Len(t, data["diagnostics"].([]any), 1)
+	assert.Equal(t, 0, output.Metadata["modules"])
+}
+
+func TestPlugin_Execute_IntrospectTree_MissingFatal(t *testing.T) {
+	t.Parallel()
+	reader := &MockFileReader{
+		ListSubdirsFunc: func(_ string) ([]string, error) {
+			return nil, fmt.Errorf("reading directory: %w", fs.ErrNotExist)
+		},
+	}
+	p := NewPlugin(WithFileReader(reader))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/missing",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ProviderName)
+}
+
+func TestPlugin_Execute_IntrospectTree_MissingDirInput(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin(WithFileReader(&MockFileReader{}))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dir")
+}
+
+// TestPlugin_Execute_IntrospectTree_NestedMissingFatalEvenWithAllowMissing
+// verifies allowMissing only tolerates an absent root: if the root exists but a
+// nested subdirectory disappears mid-traversal, the error is still fatal and is
+// not downgraded to an empty result.
+func TestPlugin_Execute_IntrospectTree_NestedMissingFatalEvenWithAllowMissing(t *testing.T) {
+	t.Parallel()
+	reader := &MockFileReader{
+		ListSubdirsFunc: func(dir string) ([]string, error) {
+			if dir == "/modules" {
+				// Root exists and has one child...
+				return []string{"/modules/group"}, nil
+			}
+			// ...but the child vanishes when we descend into it.
+			return nil, fmt.Errorf("reading directory: %w", fs.ErrNotExist)
+		},
+	}
+	p := NewPlugin(WithFileReader(reader))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation":    "introspect-tree",
+		"dir":          "/modules",
+		"depth":        2,
+		"allowMissing": true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/modules/group")
+}
+
+func TestPlugin_Execute_IntrospectTree_RejectsFileSources(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin(WithFileReader(&MockFileReader{}))
+	ctx := context.Background()
+
+	for _, k := range []string{"content", "path", "paths"} {
+		_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+			"operation": "introspect-tree",
+			"dir":       "/modules",
+			k:           "anything",
+		})
+		require.Error(t, err, "expected %q to be rejected", k)
+		assert.Contains(t, err.Error(), k)
+	}
+}
+
+func TestPlugin_Execute_IntrospectTree_ParseErrorFatal(t *testing.T) {
+	t.Parallel()
+	tree := fakeTree{
+		subdirs: map[string][]string{
+			"/modules": {"/modules/broken"},
+		},
+		hclFiles: map[string][]string{
+			"/modules/broken": {"/modules/broken/main.tf"},
+		},
+		files: map[string]string{
+			"/modules/broken/main.tf": `variable "x" { type = `,
+		},
+	}
+	p := NewPlugin(WithFileReader(tree.reader()))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/modules",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broken")
+}
+
+func TestPlugin_Execute_IntrospectTree_DryRun(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin(WithFileReader(&MockFileReader{}))
+	ctx := sdkprovider.WithDryRun(context.Background(), true)
+
+	output, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "/modules",
+	})
+	require.NoError(t, err)
+
+	data := output.Data.(map[string]any)
+	assert.Empty(t, data["modules"].([]any))
+	assert.Equal(t, "dry-run", output.Metadata["mode"])
+	assert.Equal(t, "introspect-tree", output.Metadata["operation"])
+}
+
+func TestPlugin_DescribeWhatIf_IntrospectTree(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin()
+	ctx := context.Background()
+
+	desc, err := p.DescribeWhatIf(ctx, ProviderName, map[string]any{
+		"operation": "introspect-tree",
+		"dir":       "./modules",
+		"depth":     2,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, desc, "library")
+	assert.Contains(t, desc, "./modules")
+	assert.Contains(t, desc, "depth 2")
+}
+

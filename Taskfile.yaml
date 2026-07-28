@@ -47,11 +47,11 @@ tasks:
       - go test -race -coverprofile={{.COVER}}/cover.out -covermode=atomic ./...
 
   test:e2e:
-    desc: Install the plugin locally and run the example solution's functional tests
+    desc: Install the plugin locally and run every example solution's functional tests
     deps: [publish:local]
-    dir: examples/terraform-module-scaffold
     cmds:
-      - '{{.CLI}} test functional -f solution.yaml --verbose'
+      - for: ["terraform-module-scaffold", "terraform-library-introspect"]
+        cmd: cd examples/{{.ITEM}} && {{.CLI}} test functional -f solution.yaml --verbose
 
   lint:
     desc: Run linter
