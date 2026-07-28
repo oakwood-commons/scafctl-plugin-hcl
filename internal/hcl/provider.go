@@ -808,8 +808,9 @@ func (prov *Provider) executeIntrospectTree(ctx context.Context, lgr logr.Logger
 	candidates, err := prov.discoverModuleDirs(absDir, depth)
 	if err != nil {
 		// An absent root is tolerated (empty result + diagnostic) only when opted
-		// in; otherwise it is fatal, matching the single-module introspect.
-		if allowMissing && errors.Is(err, fs.ErrNotExist) {
+		// in; otherwise it is fatal, matching the single-module introspect. A
+		// failure while walking a nested subdirectory is always fatal.
+		if allowMissing && errors.Is(err, errRootNotFound) {
 			diag := map[string]any{
 				"severity": "warning",
 				"summary":  fmt.Sprintf("source directory not found: %s", dir),
@@ -872,10 +873,29 @@ func (prov *Provider) executeIntrospectTree(ctx context.Context, lgr logr.Logger
 // root, returning every directory found within `depth` levels. The root itself
 // is never included, so a library root's own .tf files are not treated as a
 // module. Directories are filtered for HCL content by the caller.
+// errRootNotFound signals that the introspect-tree root directory itself does
+// not exist. It is distinct from a not-exist error encountered while walking a
+// nested subdirectory (a genuine traversal failure), so that allowMissing only
+// tolerates an absent root and never masks a mid-traversal problem.
+var errRootNotFound = errors.New("root directory not found")
+
 func (prov *Provider) discoverModuleDirs(root string, depth int) ([]string, error) {
-	var found []string
-	current := []string{root}
-	for level := 1; level <= depth; level++ {
+	// List the root first. A not-exist error here means the root itself is
+	// missing, which the caller may tolerate via allowMissing.
+	rootSubs, err := prov.fileReader.ListSubdirs(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", errRootNotFound, root)
+		}
+		return nil, fmt.Errorf("reading subdirectories of %s: %w", root, err)
+	}
+
+	found := append([]string{}, rootSubs...)
+	current := rootSubs
+	// Deeper levels: the root exists, so any error here (including a subdirectory
+	// that disappears or becomes unreadable mid-walk) is a genuine traversal
+	// failure and is always fatal -- it is never downgraded by allowMissing.
+	for level := 2; level <= depth; level++ {
 		var next []string
 		for _, d := range current {
 			subs, err := prov.fileReader.ListSubdirs(d)

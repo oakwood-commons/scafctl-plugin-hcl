@@ -556,6 +556,35 @@ func TestPlugin_Execute_IntrospectTree_MissingDirInput(t *testing.T) {
 	assert.Contains(t, err.Error(), "dir")
 }
 
+// TestPlugin_Execute_IntrospectTree_NestedMissingFatalEvenWithAllowMissing
+// verifies allowMissing only tolerates an absent root: if the root exists but a
+// nested subdirectory disappears mid-traversal, the error is still fatal and is
+// not downgraded to an empty result.
+func TestPlugin_Execute_IntrospectTree_NestedMissingFatalEvenWithAllowMissing(t *testing.T) {
+	t.Parallel()
+	reader := &MockFileReader{
+		ListSubdirsFunc: func(dir string) ([]string, error) {
+			if dir == "/modules" {
+				// Root exists and has one child...
+				return []string{"/modules/group"}, nil
+			}
+			// ...but the child vanishes when we descend into it.
+			return nil, fmt.Errorf("reading directory: %w", fs.ErrNotExist)
+		},
+	}
+	p := NewPlugin(WithFileReader(reader))
+	ctx := context.Background()
+
+	_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+		"operation":    "introspect-tree",
+		"dir":          "/modules",
+		"depth":        2,
+		"allowMissing": true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/modules/group")
+}
+
 func TestPlugin_Execute_IntrospectTree_RejectsFileSources(t *testing.T) {
 	t.Parallel()
 	p := NewPlugin(WithFileReader(&MockFileReader{}))
