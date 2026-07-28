@@ -9,7 +9,7 @@ variable "{{ .name }}" {
   type = {{ if hasKey . "type" }}{{ .type }}{{ else }}string{{ end }}
 }
 {{ end }}
-module "{{ .module.path }}" {
+module "{{ .module.path | replace "/" "_" }}" {
   source = "{{ .moduleSource }}"
 {{- range .module.inputs }}
   {{ .name }} = var.{{ .name }}

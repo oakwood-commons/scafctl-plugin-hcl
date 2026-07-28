@@ -556,6 +556,22 @@ func TestPlugin_Execute_IntrospectTree_MissingDirInput(t *testing.T) {
 	assert.Contains(t, err.Error(), "dir")
 }
 
+func TestPlugin_Execute_IntrospectTree_RejectsFileSources(t *testing.T) {
+	t.Parallel()
+	p := NewPlugin(WithFileReader(&MockFileReader{}))
+	ctx := context.Background()
+
+	for _, k := range []string{"content", "path", "paths"} {
+		_, err := p.ExecuteProvider(ctx, ProviderName, map[string]any{
+			"operation": "introspect-tree",
+			"dir":       "/modules",
+			k:           "anything",
+		})
+		require.Error(t, err, "expected %q to be rejected", k)
+		assert.Contains(t, err.Error(), k)
+	}
+}
+
 func TestPlugin_Execute_IntrospectTree_ParseErrorFatal(t *testing.T) {
 	t.Parallel()
 	tree := fakeTree{

@@ -101,7 +101,7 @@ spec:
                     "content": _.moduleCallTpl.content,
                     "data": {
                       "module": m,
-                      "moduleSource": "./" + _.modulesDir + "/" + m.path
+                      "moduleSource": _.modulesDir + "/" + m.path
                     }
                   })
 

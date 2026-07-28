@@ -774,6 +774,14 @@ func (prov *Provider) executeIntrospectTree(ctx context.Context, lgr logr.Logger
 	if !ok || dir == "" {
 		return nil, fmt.Errorf("%s: 'dir' is required for the introspect-tree operation", ProviderName)
 	}
+	// introspect-tree is directory-based; reject the file-source inputs so callers
+	// get a clear error instead of having them silently ignored, matching the
+	// mutual-exclusivity contract enforced for the other operations.
+	for _, k := range []string{"content", "path", "paths"} {
+		if _, present := inputs[k]; present {
+			return nil, fmt.Errorf("%s: introspect-tree only accepts 'dir'; %q is not supported", ProviderName, k)
+		}
+	}
 
 	depth, err := introspectTreeDepth(inputs)
 	if err != nil {
