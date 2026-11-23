@@ -1,5 +1,9 @@
 # scafctl-plugin-hcl - AI Agent Instructions
 
+<!-- copilot-review:start -->
+For pull request code review, follow the review contract in [`REVIEW.md`](../REVIEW.md) at the repo root. It is the single source of truth; do not duplicate it here.
+<!-- copilot-review:end -->
+
 ## Overview
 
 scafctl **provider** plugin implementing the **hcl** provider: parse, format,
@@ -108,7 +112,3 @@ default repo `GITHUB_TOKEN` cannot write the org-level catalog index (403).
 - **No hardcoded paths**: Use the SDK interfaces for all host interactions.
 - **Test coverage**: Every new file must have tests. Target 70%+ patch coverage.
 - **Git safety**: Never run git commit/push unless explicitly asked.
-
-<!-- copilot-review:start -->
-For pull request code review, follow the review contract in [`REVIEW.md`](../REVIEW.md) at the repo root. It is the single source of truth; do not duplicate it here.
-<!-- copilot-review:end -->
